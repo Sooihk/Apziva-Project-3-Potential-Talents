@@ -11,4 +11,11 @@ ruff
 scikit-learn
 tqdm
 typer
+adjustText
+nltk
+seaborn
+gensim
+# Optional: install datasets like GloVe externally
+# ! wget http://nlp.stanford.edu/data/glove.6B.zip
+
 -e .
