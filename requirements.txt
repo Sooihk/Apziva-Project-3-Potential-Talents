@@ -15,6 +15,8 @@ adjustText
 nltk
 seaborn
 gensim
+torch
+transformers
 # Optional: install datasets like GloVe externally
 # ! wget http://nlp.stanford.edu/data/glove.6B.zip
 
