@@ -57,5 +57,14 @@ A short description of the project.
     └── plots.py                <- Code to create visualizations
 ```
 
+pip install -r requirements.txt
+
+python -m potential_talents.preprocessing
+
+Load pretrained Word2Vec (Google News)
+https://github.com/mmihaltz/word2vec-GoogleNews-vectors/blob/master/GoogleNews-vectors-negative300.bin.gz
+python -m potential_talents.vectorizations
+![alt text](image.png)
+![alt text](image-1.png)
 --------
 

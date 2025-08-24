@@ -1,24 +1,28 @@
+# Core development and data science
 ipython
 jupyterlab
-loguru
-matplotlib
 notebook
 numpy
 pandas
-pip
-python-dotenv
-ruff
 scikit-learn
 tqdm
-typer
+matplotlib
+seaborn
 adjustText
 nltk
-seaborn
+loguru
+typer
+ruff
+python-dotenv
+
+# NLP and embeddings
 gensim
 torch
 transformers
 sentence-transformers
+
 # Optional: install datasets like GloVe externally
 # ! wget http://nlp.stanford.edu/data/glove.6B.zip
 
+# Editable install (if using local modules)
 -e .
