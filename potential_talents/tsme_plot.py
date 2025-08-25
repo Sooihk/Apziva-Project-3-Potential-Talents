@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from adjustText import adjust_text
 import numpy as np
+from tabulate import tabulate
 
 def plot_embedding_tSNE(df, fit_col, keyword_vector, keyword_label='KEYWORD', label_col='job_title', top_n=50, title='t-SNE Embedding Visualization'):
     """
@@ -60,3 +61,21 @@ def plot_embedding_tSNE(df, fit_col, keyword_vector, keyword_label='KEYWORD', la
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+def print_candidate_table(df, vector_fit, top_n=15, max_title_len=105):
+    """
+    Prints a nicely formatted table of the top N ranked candidates with truncated job titles.
+
+    Parameters:
+    - df: pandas DataFrame containing at least 'id', 'job_title', 'location', 'connection', and 'fit_SBERT'
+    - top_n: number of rows to display (default = 15)
+    - max_title_len: maximum length of job title before truncating (default = 105)
+    """
+    def truncate_string(s, max_len=max_title_len):
+        return s if len(s) <= max_len else s[:max_len] + '...'
+    # Select subset
+    subset = df[['id', 'job_title', 'location', 'connection', vector_fit]].head(top_n).copy()
+    # Truncate long job titles
+    subset['job_title'] = subset['job_title'].astype(str).apply(lambda x: truncate_string(x))
+    # Print as pretty table
+    print(tabulate(subset, headers='keys', tablefmt='fancy_grid'))

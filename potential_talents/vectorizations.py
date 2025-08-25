@@ -3,9 +3,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import re
+import torch
 import string
 import nltk
-from potential_talents.tsme_plot import 
+from potential_talents.tsme_plot import plot_embedding_tSNE, print_candidate_table
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from sklearn.feature_extraction.text import CountVectorizer
@@ -13,6 +14,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from tabulate import tabulate
 from gensim.models import KeyedVectors
+from gensim.scripts.glove2word2vec import glove2word2vec
+from gensim.models.fasttext import load_facebook_vectors    # loading FB's pretrained FastText model
+from transformers import BertTokenizer, BertModel
+from sentence_transformers import SentenceTransformer, util 
+
+
 
 
 # Make sure NLTK resources are downloaded
@@ -75,6 +82,7 @@ def preprocess_user_keywords(job_title, location):
     # Combine processed job_title and location into one string for vectorization
     combined_text = f"{job_title_cleaned} {location_cleaned}"
     return combined_text
+#-----------------------------------------------------------------------------------------------------------------------------------------------
 
 def rank_candidates_BoW(keyword, df):
     """ 
@@ -94,7 +102,9 @@ def rank_candidates_BoW(keyword, df):
 
     # fit and transform the collection, learning the vocab from the collection and creating a sparse word count matrix
     vectors = vectorizer.fit_transform(title_location)
-
+    df['embedding'] = list(vectors[:-1].toarray())
+    keyword_vector = vectors[-1].toarray().flatten()
+    
     # compute cosine similarity (last vector is the keyword)
     # Between candidate vector which is (vectors[:-1] all except last row)
     # and keyword vector (vectors[-1], last row)
@@ -107,26 +117,9 @@ def rank_candidates_BoW(keyword, df):
     ranked_candidates = df.sort_values(by=['fit_BoW', 'connection'], ascending = [False, False])
     #number of ranked candidates based on the keyword
     print('There are', ranked_candidates[ranked_candidates['fit_BoW']!=0].shape[0],'ranked candidates for the job',keyword)
-    return ranked_candidates
 
-def print_candidate_table(df, vector_fit, top_n=15, max_title_len=105):
-    """
-    Prints a nicely formatted table of the top N ranked candidates with truncated job titles.
-
-    Parameters:
-    - df: pandas DataFrame containing at least 'id', 'job_title', 'location', 'connection', and 'fit_SBERT'
-    - top_n: number of rows to display (default = 15)
-    - max_title_len: maximum length of job title before truncating (default = 105)
-    """
-    def truncate_string(s, max_len=max_title_len):
-        return s if len(s) <= max_len else s[:max_len] + '...'
-    # Select subset
-    subset = df[['id', 'job_title', 'location', 'connection', vector_fit]].head(top_n).copy()
-    # Truncate long job titles
-    subset['job_title'] = subset['job_title'].astype(str).apply(lambda x: truncate_string(x))
-    # Print as pretty table
-    print(tabulate(subset, headers='keys', tablefmt='fancy_grid'))
-
+    return ranked_candidates, keyword_vector
+#-----------------------------------------------------------------------------------------------------------------------------------------------
 def rank_candidates_TF_IDF(keyword, df):
     """ 
     Uses TfidfVectorizer, computes cosine similarity between candidates and user keyword
@@ -140,9 +133,11 @@ def rank_candidates_TF_IDF(keyword, df):
 
     # Initialize TF-IDF Vectorizer
     tfidf_vectorizer = TfidfVectorizer()
-
     # fit and transform collection, vectorization
     vectors = tfidf_vectorizer.fit_transform(collection)
+
+    df['embedding'] = list(vectors[:-1].toarray())
+    keyword_vector = vectors[-1].toarray().flatten()
 
     # compute cosine similarity 
     cosine_sim = cosine_similarity(vectors[:-1], vectors[-1].reshape(1,-1))
@@ -154,11 +149,10 @@ def rank_candidates_TF_IDF(keyword, df):
     ranked_candidates = df.sort_values(by=['fit_tfidf', 'connection'], ascending=[False, False])
     #number of ranked candidates based on the keyword
     print('There are', ranked_candidates[ranked_candidates['fit_tfidf']!=0].shape[0],'ranked candidates for the job',keyword)
-    return ranked_candidates
 
+    return ranked_candidates, keyword_vector
+#-----------------------------------------------------------------------------------------------------------------------------------------------
 
-google_w2v_model_filepath = "../models/GoogleNews-vectors-negative300.bin"
-w2v_model = KeyedVectors.load_word2vec_format(google_w2v_model_filepath, binary=True)
 def average_word2vec(text, model, embedding_dimension = 300):
     words = text.split()
     # if word exists in model's vocab, collect word vectors
@@ -180,23 +174,183 @@ def rank_candidates_Word2Vec(keyword, df, model):
     Compute average Word2Vec vector for each candidate and user keyword
     Compute cosine simlarity and append fit bassed score
     """
-    title_location = (df['job_title'] + ' ' + df['location']).astype(str).tolist()
+    df = df.copy()
+    df['text'] = df['job_title'] + ' ' + df['location']
+    title_location = df['text'].astype(str).tolist()
 
     # Compute Word2Vec average vector for each candidate
     candidate_word2vec = np.array([average_word2vec(string, model) for string in title_location])
-
     # Compute Word2Vec vector for keyword
     keyword_word2vec = average_word2vec(keyword, model)
 
+    df['embedding'] = list(candidate_word2vec)
     # compute cosine similarity 
     cosine_sim = cosine_similarity(candidate_word2vec, keyword_word2vec.reshape(1,-1))  # reshape to convert keyword vector to 2d array
-
     # Add the word2vec fit score to the passing dataframe
     df['fit_w2v'] = cosine_sim.flatten()
 
     ranked_candidates = df.sort_values(by=['fit_w2v', 'connection'], ascending=[False, False])
     print('There are', ranked_candidates[ranked_candidates['fit_w2v']!=0].shape[0],'ranked candidates for the job',keyword)
-    return ranked_candidates
+
+    return ranked_candidates, keyword_word2vec
+#-----------------------------------------------------------------------------------------------------------------------------------------------
+
+# GloVe utilities
+# function to convert .txt GloVe file into Word2Vec Format 
+def convert_glove_to_word2vec(glove_file_path, word2vec_output_path):
+    glove2word2vec(glove_file_path, word2vec_output_path)
+
+# Load pretrained GloVe to return a KeyedVectors object
+def load_glove_model(word2vec_output_path):
+    model = KeyedVectors.load_word2vec_format(word2vec_output_path, binary=False)
+    return model
+
+# Average GloVe embedding for a candidate string
+def get_average_glove(text, model, dim=300):
+    """ 
+    Transforms candidates text or keyword query into fixed size vector to allow for comparison
+    between candidates and query in a shared embedding space and use cosine similarity
+    """
+    words = text.split()
+    # collecting vectors for in-vocab words only, otherwise return 0 vector
+    vectors = [model[word] for word in words if word in model]
+    if vectors:
+        return np.mean(vectors, axis=0)     # average across all words
+    else:
+        return np.zeros(dim)
+
+# GloVe function
+
+def rank_candidates_GloVe(keyword, df, model, embedding_dim=300):
+    """ 
+    Rank candidates in terms of semantic similarity to the user query using dense vector representation.
+    Also returns keyword vector for visualization.
+    """
+    df = df.copy()
+    df['text'] = df['job_title'] + ' ' + df['location']
+    combined_text = df['text'].astype(str).tolist()
+
+    candidate_vectors = np.array([get_average_glove(text, model, embedding_dim) for text in combined_text])
+    keyword_vector = get_average_glove(keyword, model, embedding_dim)
+
+    df['embedding'] = list(candidate_vectors)
+    cosine_sim = cosine_similarity(candidate_vectors, keyword_vector.reshape(1, -1))
+    df['fit_glove'] = cosine_sim.flatten()
+
+    ranked_candidates = df.sort_values(by=['fit_glove', 'connection'], ascending=[False, False])
+    print('There are', ranked_candidates[ranked_candidates['fit_glove'] != 0].shape[0],
+          'ranked candidates for the job', keyword)
+
+    return ranked_candidates, keyword_vector
+#-----------------------------------------------------------------------------------------------------------------------------------------------
+# FASTTEXT
+def get_average_fasttext(text_string, model, vector_size=300):
+    """ 
+    Convert text string into a single fixed-sized vector by averaging word embeddings
+    """
+    # Return zero vector if text is empty
+    if not isinstance(text_string, str) or text_string.strip() == "":
+        return np.zeros(vector_size)
+    
+    words = text_string.lower().split()
+    vectors = []
+    # retrieve vector from FastText model from each word
+    for word in words:
+        try:
+            vectors.append(model[word])
+        except KeyError:
+            continue
+    # Return zero vector if no valid word vectors were found
+    if not vectors:
+        return np.zeros(vector_size)
+    
+    return np.mean(vectors, axis=0)
+
+def rank_candidates_FastText(df, keyword, model, vector_size=300):
+    """ 
+    Obtain cosine similarity between candidate and keyword vectors using FastText, append fit score to passing dataframe
+    """
+    df = df.copy()
+    df['text'] = df['job_title'] + ' ' + df['location']
+    combined_text = df['text'].astype(str).tolist()
+    
+    # Computing cosine similarity fit score
+    # convert list of 300D vectors inot 2D numpy array where each row is candidate vector and column is FastText dimension
+    candidate_vectors = np.array([get_average_fasttext(text, model) for text in combined_text])
+    keyword_vector = get_average_fasttext(keyword, model, vector_size)
+
+    df['embedding'] = list(candidate_vectors)
+    cosine_sim = cosine_similarity(candidate_vectors, keyword_vector.reshape(1,-1))
+    df['fit_fasttext'] = cosine_sim.flatten()
+
+    ranked_candidates = df.sort_values(by=['fit_fasttext', 'connection'], ascending=[False, False])
+    print('There are', ranked_candidates[ranked_candidates['fit_fasttext']!=0].shape[0],'ranked candidates for the job',keyword)
+
+    return ranked_candidates,keyword_vector
+#-----------------------------------------------------------------------------------------------------------------------------------------------
+# BERT
+def rank_candidates_BERT(df, query_text, model, tokenizer, max_length=64):
+    """ 
+    Use bert-based-uncased, tokenizes candidate text and query, compuytes the average token embedding, calculates cosine similarity fit scores
+    and returns the dataframe with the fit BERT score. 
+    Parameters:
+    - model: pretrained BERT model
+    - tokenizer: matching BERT tokenizer
+    - max_length: max token length for truncation
+    """
+    def get_avg_embedding(text):
+        # tokenize the text into a format BERT expects
+        input_tokenized = tokenizer(text, return_tensors='pt', truncation=True, padding=True , max_length=max_length)
+        # Feed the tokenized inputs into the pretrained BERT model
+        with torch.no_grad():   # run in inference mode, disabling gradient tracking
+            outputs = model(**input_tokenized)
+        # Extract token embeddings, obtaining a matrix of token embeddings
+        last_hidden = outputs.last_hidden_state.squeeze(0)
+        # returning single 768-dim vector returns NumPy array
+        return last_hidden.mean(dim=0).numpy()
+    # convert the user query into BERT vector
+    query_vec = get_avg_embedding(query_text)
+
+    # combine candidate's datainto a single text string into a 768 dimensional average BERT vector
+    combined_texts = (df['job_title'] + ' ' + df['location']).tolist()
+    candidate_vectors = np.array([get_avg_embedding(text) for text in combined_texts])
+
+    # Compute cosine similarity between candidate vector and query vector
+    # reshape(1,-1) to ensure query is in shape (1,768) and flatten() to 1D array
+    df['embedding'] = list(candidate_vectors)
+    similarity_scores = cosine_similarity(candidate_vectors, query_vec.reshape(1,-1)).flatten()   
+    df['fit_BERT'] = similarity_scores
+
+    ranked_candidates = df.sort_values(by=['fit_BERT', 'connection'], ascending=[False, False])
+    print('There are', ranked_candidates[ranked_candidates['fit_BERT']!=0].shape[0],'ranked candidates for the job', query_text)
+
+    return ranked_candidates, query_vec
+#-----------------------------------------------------------------------------------------------------------------------------------------------
+
+# SBERT
+def rank_candidates_SBERT(df, query, model):
+    """ 
+    Compute semantic similarity fit scores using a pretrained SBERT Sentence Transformer.
+    """
+    # Combine candidate text into a unified field
+    combined_text = (df['job_title'] + ' ' + df['location']).tolist()
+
+    # Encode Candidate and Keyword texts using model.encode() to convert text into dense sentence embeddings
+    # convert_to_tensor=True, returns PyTorch tensors for fast computation
+    # normalize_embeddings=True, L2-normalizes each vector
+    candidate_embeddings = model.encode(combined_text, convert_to_tensor=True, normalize_embeddings=True)
+    query_embedding = model.encode(query, convert_to_tensor=True, normalize_embeddings=True)
+
+    df['embedding'] = [emb.cpu().numpy() for emb in candidate_embeddings]
+    # Compute cosine similarity 
+    cosine_scores = util.cos_sim(candidate_embeddings, query_embedding).cpu().numpy().flatten()
+    df['fit_SBERT'] = cosine_scores
+
+    ranked_candidates = df.sort_values(by=['fit_SBERT', 'connection'], ascending=[False, False])
+    print('There are', ranked_candidates[ranked_candidates['fit_SBERT']!=0].shape[0],'ranked candidates for the job', query)
+
+    return ranked_candidates, query_embedding.cpu().numpy()
+
 
 if __name__ == "__main__":
     processed_potential_talents = pd.read_csv('../data/interim/processed_potential_talents.csv')
@@ -215,6 +369,7 @@ if __name__ == "__main__":
         print("5. FastText")
         print("6. BERT")
         print("7. SBERT")
+        print('0. Exit')
 
         try:
             method = int(input('Choose number for which vectorization method to perform: '))
@@ -224,13 +379,62 @@ if __name__ == "__main__":
 
         if method == 1:
             print("Bag of Words selected.")
-            ranked_candidates_df = rank_candidates_BoW(keyword, processed_potential_talents)
-            print_candidate_table(ranked_candidates_df, vector_fit="fit_BOW")
+            ranked_candidates_df, keyboard_vec = rank_candidates_BoW(keyword, processed_potential_talents)
+            print_candidate_table(ranked_candidates_df, vector_fit="fit_BoW")
+            plot_embedding_tSNE(ranked_candidates_df, fit_col='fit_BoW', keyboard_vector = keyboard_vec, title = 'BoW t-SNE Embedding Visualization')
         elif method == 2:
             print("Term Frequency - Inverse Document Frequnecy selected.")
-            ranked_candidates_df = rank_candidates_TF_IDF(keyword, processed_potential_talents)
+            ranked_candidates_df, keyboard_vec = rank_candidates_TF_IDF(keyword, processed_potential_talents)
             print_candidate_table(ranked_candidates_df, vector_fit="fit_tfidf")
+            plot_embedding_tSNE(ranked_candidates_df, fit_col='fit_tfidf', keyboard_vector = keyboard_vec, title = 'TF-IDF t-SNE Embedding Visualization')
         elif method == 3:
             print("Word2Vec selected.")
-            ranked_candidates_df = rank_candidates_TF_IDF(keyword, processed_potential_talents)
-            print_candidate_table(ranked_candidates_df, vector_fit="fit_tfidf")
+            print("Loading Word2Vec Dataset")
+            google_w2v_model_filepath = "../models/GoogleNews-vectors-negative300.bin"
+            w2v_model = KeyedVectors.load_word2vec_format(google_w2v_model_filepath, binary=True)
+            ranked_candidates_df, keyboard_vec = rank_candidates_TF_IDF(keyword, processed_potential_talents)
+            print_candidate_table(ranked_candidates_df, vector_fit="fit_w2v")
+            plot_embedding_tSNE(ranked_candidates_df, fit_col='fit_w2v', keyboard_vector = keyboard_vec, title = 'Word2Vec t-SNE Embedding Visualization')
+        elif method == 4:
+            print('GloVe selected.')
+            print("Loading pretrained GloVe word vector.")
+            glove_filepath = "../models/glove.6B.300d.txt"
+            # Convert the GloVe file once
+            convert_glove_to_word2vec(glove_filepath, "../models/glove.6B.300d.word2vec.txt")
+            # Load the converted file
+            glove_model = load_glove_model("../models/glove.6B.300d.word2vec.txt")
+            ranked_candidates_df, keyword_vec = rank_candidates_GloVe(keyword, processed_potential_talents, glove_model)
+            plot_embedding_tSNE(ranked_candidates_df, fit_col='fit_glove', keyword_vector=keyword_vec, title='GloVe t-SNE Embedding Visualization')
+            print_candidate_table(ranked_candidates_df, vector_fit="fit_glove")
+        elif method == 5:
+            print("FastText selected.")
+            # Load Facebook's pretrained FastText model 'cc.en.300.bin'
+            fasttext_model = load_facebook_vectors('../models/cc.en.300.bin')
+            ranked_candidates_df = rank_candidates_FastText(processed_potential_talents, keyword, fasttext_model)
+            plot_embedding_tSNE(ranked_candidates_df, fit_col='fit_fasttext', keyword_vector=keyword_vec, title='FastText t-SNE Embedding Visualization')
+            print_candidate_table(ranked_candidates_df, vector_fit="fit_fasttext")
+        elif method == 6:
+            print("BERT (Bidirectional Encoder Representations from Transformers) selected.")
+            # Load BERT-base Model and Tokenizier
+            print("Loading Bert-base Model.")
+            tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            bert_model = BertModel.from_pretrained('bert-base-uncased', output_hidden_states=True)
+            bert_model.eval() # disable dropout
+
+            ranked_candidates_df, keyword_vec = rank_candidates_BERT(processed_potential_talents, keyword, bert_model, tokenizer)
+            plot_embedding_tSNE(ranked_candidates_df, fit_col='fit_BERT', keyword_vector=keyword_vec, title='BERT t-SNE Embedding Visualization')
+            print_candidate_table(ranked_candidates_df, vector_fit="fit_BERT")
+        elif method == 7:
+            print("SBERT (Sentence Bidirectional Encoder Representations from Transformers) selected.")
+            # Load SBERT model once 
+            sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+            print("Loading SBERT model checkpoint all-MiniLM-L6-v2")
+
+            ranked_candidates_df, keyword_vec= rank_candidates_SBERT(processed_potential_talents, keyword, sbert_model)
+            plot_embedding_tSNE(ranked_candidates_df, fit_col='fit_SBERT', keyword_vector=keyword_vec, title='SBERT t-SNE Embedding Visualization')
+            print_candidate_table(ranked_candidates_df, vector_fit="fit_SBERT")
+        elif method == 0:
+            print("Exiting.")
+            break
+        else:
+            print("Invalid selection. Please try again.")
