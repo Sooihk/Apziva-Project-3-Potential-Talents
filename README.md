@@ -61,8 +61,12 @@ pip install -r requirements.txt
 
 python -m potential_talents.preprocessing
 
-Load pretrained Word2Vec (Google News)
-https://github.com/mmihaltz/word2vec-GoogleNews-vectors/blob/master/GoogleNews-vectors-negative300.bin.gz
+Download the following pretrained models and move them into models folder:
+Load pretrained Word2Vec (Google News) : https://github.com/mmihaltz/word2vec-GoogleNews-vectors/blob/master/GoogleNews-vectors-negative300.bin.gz
+Load pretrained GloVe embedding glove.6B.300d.txt. Can find the file at Stanford NLP group's GloVe page : https://nlp.stanford.edu/projects/glove/ 
+Load Facebook's pretrained FastText model 'cc.en.300.bin'
+
+
 python -m potential_talents.vectorizations
 
 python -m potential_talents.rerank_sbert
